@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fireworks Unitendified Flying Oliver</title>
+    <!-- Load Tailwind CSS --><script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Tone.js for sound effects --><script src="https://unpkg.com/tone@14.8.49/build/Tone.js"></script>
+    <style>
+        /* Ensures HTML and Body take up the full viewport */
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden; /* Prevent scrolling */
+        }
+        
+        /* Custom styles for the canvas (positioning is now handled by Tailwind classes on the element itself) */
+        #fireworks-canvas {
+            display: block;
+            background-color: #0b0c10; /* Very dark background for sky */
+            cursor: crosshair;
+        }
+
+        /* Set Inter font */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+
+    <!-- Canvas element now covers the entire viewport using fixed positioning --><canvas id="fireworks-canvas" class="fixed inset-0 w-full h-full"></canvas>
+
+    <!-- Game UI (Floats over the canvas) --><div id="game-ui" class="fixed top-4 left-1/2 transform -translate-x-1/2 z-20 text-center bg-gray-800/70 p-4 rounded-xl shadow-2xl border border-gray-700 max-w-lg w-full md:max-w-xl">
+        <h1 class="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-yellow-300 to-red-500 mb-2">
+            🛸 Unitendified Flying Oliver
+        </h1>
+        <div class="flex justify-between items-center text-lg font-mono px-4">
+            <div id="score-display">Score: 0</div>
+            <div id="misses-display">Misses: 0</div>
+        </div>
+        <p id="instructions" class="text-sm text-gray-300 mt-2">
+            Click or tap the <span class="text-green-400 font-semibold">UFO</span> carrying the boy, dog, and cat to score points! (Watch out, it gets faster!)
+        </p>
+    </div>
+
+    <!-- Game Over/Win Message Modal (Currently unused, but kept for future expansion) --><div id="game-message" class="fixed inset-0 bg-gray-900/90 z-30 flex items-center justify-center hidden">
+        <div class="bg-gray-800 p-8 rounded-xl shadow-2xl border-4 border-yellow-500 text-center w-full max-w-sm">
+            <h2 id="message-title" class="text-4xl font-extrabold mb-4 text-yellow-300">Game Over!</h2>
+            <p id="final-score" class="text-xl text-gray-200 mb-6"></p>
+            <button id="restart-button" class="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg shadow-xl transition transform hover:scale-105">
+                Play Again
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // --- Game State Variables ---
+        let GAME_STATE = 'running'; // 'running', 'over'
+        let SCORE = 0;
+        let MISSES = 0;
+        const TARGET_HIT_RADIUS = 40; // Adjusted for smaller ship
+        const TARGET_AREA_HEIGHT = 0.95; // The target can move up to 95% down the screen
+
+        // --- Tone.js Audio Setup ---
+        let ufoSynth;      // Eerie maneuver/move sound
+        let laserSynth;    // Laser shot sound
+        let explosionSynth; // Hit explosion sound
+        let ufoPanner;
+        let isAudioInitialized = false;
+
+        function initAudio() {
+            if (isAudioInitialized) return;
+
+            // Panner for stereo effect based on UFO position
+            ufoPanner = new Tone.Panner().toDestination();
+            
+            // 1. UFO Maneuver Sound (Eerie, metallic whoop/gong)
+            ufoSynth = new Tone.AMSynth({
+                oscillator: { type: "sawtooth" },
+                modulation: { type: "square" },
+                modulationIndex: 10,
+                envelope: { attack: 0.05, decay: 0.3, sustain: 0.01, release: 0.5 },
+                vibrato: { depth: 0.5, frequency: 5 }
+            }).connect(ufoPanner);
+            
+            // 2. Laser Shot Sound (Pink noise burst)
+            laserSynth = new Tone.NoiseSynth({
+                noise: { type: "pink" },
+                envelope: { attack: 0.005, decay: 0.1, sustain: 0, release: 0.05 }
+            }).toDestination();
+
+            // 3. Explosion Sound (Brown noise impact with bandpass filter)
+            explosionSynth = new Tone.NoiseSynth({
+                noise: { type: "brown" },
+                envelope: { attack: 0.001, decay: 0.5, sustain: 0.01, release: 0.8 },
+                filter: { type: "bandpass", frequency: 400, Q: 0.5 }
+            }).toDestination();
+
+
+            Tone.context.lookAhead = 0.01; // Reduce latency
+            isAudioInitialized = true;
+        }
+
+        function playUfoMoveSound() {
+            if (GAME_STATE === 'running' && isAudioInitialized) {
+                // Adjust panner based on target's horizontal position for stereo effect
+                const panValue = (TARGET.x / canvas.width) * 2 - 1; // Maps 0 (-1) to width (1)
+                ufoPanner.pan.value = panValue * 0.5; // Dampen the effect slightly
+                
+                // Play a low, eerie note
+                ufoSynth.triggerAttackRelease("C3", "4n");
+            }
+        }
+        
+        // --- DOM Elements ---
+        const scoreDisplay = document.getElementById('score-display');
+        const missesDisplay = document.getElementById('misses-display');
+        const gameMessage = document.getElementById('game-message');
+        const messageTitle = document.getElementById('message-title');
+        const finalScore = document.getElementById('final-score');
+        const restartButton = document.getElementById('restart-button');
+        const instructions = document.getElementById('instructions');
+
+        // --- Canvas Setup ---
+        const canvas = document.getElementById('fireworks-canvas');
+        const ctx = canvas.getContext('2d');
+        const FIREWORKS = [];
+        const PARTICLES = [];
+        const GRAVITY = 0.05;
+        const FRICTION = 0.95;
+        const COLORS = ['#ff4500', '#ffd700', '#00ff7f', '#1e90ff', '#ff69b4', '#9370db', '#adff2f'];
+
+        // --- Utility Functions ---
+        const random = (min, max) => Math.random() * (max - min) + min;
+        const randomColor = () => COLORS[Math.floor(random(0, COLORS.length))];
+        const dist = (x1, y1, x2, y2) => Math.hypot(x1 - x2, y1 - y2);
+
+        // --- Target Object (Main UFO) ---
+        const TARGET = {
+            x: 0,
+            y: 0,
+            radius: 40, // Smaller radius for the ship
+            vx: 1.5,
+            vy: 1.5,
+            bodyColor: '#a0a0a0',
+            domeColor: '#c0f0c0',
+            lightColors: ['#00FF00', '#FFD700', '#00FFFF'],
+            lightColorIndex: 0,
+            lightSwitchCounter: 0,
+            lightSwitchRate: 20,
+            
+            init: function() {
+                this.x = random(this.radius, canvas.width - this.radius);
+                this.y = random(50 + this.radius, canvas.height * TARGET_AREA_HEIGHT - this.radius);
+                this.vx = (Math.random() > 0.5 ? 1 : -1) * random(1, 2);
+                this.vy = (Math.random() > 0.5 ? 1 : -1) * random(1, 2);
+            },
+            
+            update: function() {
+                // Movement logic
+                this.x += this.vx;
+                this.y += this.vy;
+                
+                // Light cycling
+                this.lightSwitchCounter++;
+                if (this.lightSwitchCounter > this.lightSwitchRate) {
+                    this.lightColorIndex = (this.lightColorIndex + 1) % this.lightColors.length;
+                    this.lightSwitchCounter = 0;
+                }
+
+                // Bounce off horizontal edges
+                if (this.x + this.radius > canvas.width || this.x - this.radius < 0) {
+                    this.vx *= -1;
+                    playUfoMoveSound(); // Play sound on maneuver
+                    if (this.x + this.radius > canvas.width) this.x = canvas.width - this.radius;
+                    if (this.x - this.radius < 0) this.x = this.radius;
+                }
+                
+                // Bounce off vertical edges (Top boundary is 50px offset from the UI element)
+                const topBound = 50 + this.radius;
+                const bottomBound = canvas.height * TARGET_AREA_HEIGHT - this.radius;
+
+                if (this.y < topBound || this.y > bottomBound) {
+                    this.vy *= -1;
+                    playUfoMoveSound(); // Play sound on maneuver
+                    if (this.y < topBound) this.y = topBound;
+                    if (this.y > bottomBound) this.y = bottomBound;
+                }
+            },
+            
+            draw: function() {
+                ctx.save();
+                
+                // Draw pulsating light effect (bottom light beam)
+                ctx.beginPath();
+                ctx.globalAlpha = 0.6;
+                const lightColor = this.domeColor;
+                ctx.fillStyle = `rgba(${parseInt(lightColor.slice(1,3), 16)}, ${parseInt(lightColor.slice(3,5), 16)}, ${parseInt(lightColor.slice(5,7), 16)}, 0.4)`;
+                ctx.ellipse(this.x, this.y + this.radius / 2, this.radius * 1.5, this.radius * 0.5, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // UFO Body (ellipse)
+                ctx.globalAlpha = 1.0;
+                ctx.fillStyle = this.bodyColor;
+                ctx.beginPath();
+                ctx.ellipse(this.x, this.y, this.radius * 1.2, this.radius * 0.6, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // UFO Dome (arc)
+                ctx.fillStyle = this.domeColor;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y - this.radius * 0.4, this.radius * 0.7, Math.PI, 0, false);
+                ctx.closePath();
+                ctx.fill();
+
+                // --- Boy, Dog, and Cat ON TOP of the dome ---
+                const domeCenterX = this.x;
+                const domeCenterY = this.y - this.radius * 0.4; 
+                
+                // NEW BASE: The platform on top of the dome
+                const platformY = domeCenterY - this.radius * 0.75; // Position the platform slightly above the highest point of the glass
+                const platformWidth = this.radius * 0.8;
+                const platformHeight = this.radius * 0.15;
+                
+                // Draw a simple platform on top of the dome
+                ctx.fillStyle = '#402020'; // Dark color for the platform
+                ctx.beginPath();
+                ctx.rect(domeCenterX - platformWidth / 2, platformY, platformWidth, platformHeight);
+                ctx.fill();
+                
+                // This will be the base line for the characters
+                const charactersBaseY = platformY; 
+
+                // --- 1. Boy ---
+                const boyHeadRadius = this.radius * 0.15; // 6
+                const boyBodyHeight = this.radius * 0.3;  // 12
+                const boyX = domeCenterX - this.radius * 0.2; // Slightly left of center
+                
+                // Positioning adjusted to sit on the new platform
+                const boyY = charactersBaseY - boyBodyHeight - boyHeadRadius * 0.8; 
+
+                // Boy Head (Skin tone)
+                ctx.fillStyle = '#FFDAB9';
+                ctx.beginPath();
+                ctx.arc(boyX, boyY, boyHeadRadius, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Boy Body (Torso - Skin tone/Bare Chest)
+                ctx.fillStyle = '#FFDAB9'; 
+                ctx.fillRect(boyX - boyHeadRadius, boyY + boyHeadRadius * 0.8, boyHeadRadius * 2, boyBodyHeight * 0.7); 
+
+                // Boy Shorts (Dark)
+                ctx.fillStyle = '#402020'; 
+                ctx.fillRect(boyX - boyHeadRadius, boyY + boyHeadRadius * 0.8 + boyBodyHeight * 0.7, boyHeadRadius * 2, boyBodyHeight * 0.3); 
+
+                // Boy Eyes/Smile
+                ctx.fillStyle = '#000000';
+                ctx.beginPath();
+                ctx.arc(boyX - boyHeadRadius * 0.4, boyY - boyHeadRadius * 0.3, this.radius * 0.03, 0, Math.PI * 2);
+                ctx.arc(boyX + boyHeadRadius * 0.4, boyY - boyHeadRadius * 0.3, this.radius * 0.03, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Smile
+                ctx.beginPath();
+                ctx.arc(boyX, boyY + boyHeadRadius * 0.2, this.radius * 0.05, 0, Math.PI, false);
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // --- 2. Dog (Bulldog/Boxer style - two-tone) ---
+                const dogScale = this.radius * 0.4; 
+                const dogX = domeCenterX + this.radius * 0.25; // Right of the boy
+                
+                // Positioning adjusted to sit on the new platform
+                const dogY = charactersBaseY - dogScale * 0.8; 
+
+                // Dog Body (Base White/Light)
+                ctx.fillStyle = '#F5F5DC'; // Slightly creamy white
+                ctx.beginPath();
+                ctx.ellipse(dogX, dogY + dogScale * 0.3, dogScale * 0.6, dogScale * 0.4, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Dog Head (Base White)
+                ctx.beginPath();
+                ctx.moveTo(dogX - dogScale * 0.3, dogY - dogScale * 0.5);
+                ctx.lineTo(dogX + dogScale * 0.3, dogY - dogScale * 0.5);
+                ctx.arcTo(dogX + dogScale * 0.4, dogY - dogScale * 0.5, dogX + dogScale * 0.4, dogY - dogScale * 0.4, dogScale * 0.1);
+                ctx.lineTo(dogX + dogScale * 0.4, dogY);
+                ctx.lineTo(dogX - dogScale * 0.4, dogY);
+                ctx.lineTo(dogX - dogScale * 0.4, dogY - dogScale * 0.4);
+                ctx.arcTo(dogX - dogScale * 0.4, dogY - dogScale * 0.5, dogX - dogScale * 0.3, dogY - dogScale * 0.5, dogScale * 0.1);
+                ctx.closePath();
+                ctx.fill();
+
+
+                // Dog Brindle Patches (Brown, more detailed)
+                ctx.fillStyle = '#8B4513'; 
+                
+                // Right Eye Patch
+                ctx.beginPath();
+                ctx.ellipse(dogX + dogScale * 0.25, dogY - dogScale * 0.3, dogScale * 0.2, dogScale * 0.15, Math.PI / 8, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Left Ear/Cheek Patch (partial)
+                ctx.beginPath();
+                ctx.ellipse(dogX - dogScale * 0.35, dogY - dogScale * 0.2, dogScale * 0.15, dogScale * 0.1, -Math.PI / 6, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Dog Eyes/Nose
+                ctx.fillStyle = '#000000';
+                ctx.beginPath();
+                ctx.arc(dogX - dogScale * 0.1, dogY - dogScale * 0.3, this.radius * 0.02, 0, Math.PI * 2); // Left Eye
+                ctx.arc(dogX + dogScale * 0.15, dogY - dogScale * 0.3, this.radius * 0.02, 0, Math.PI * 2); // Right Eye (in patch)
+                ctx.fill();
+                
+                // Nose
+                ctx.beginPath();
+                ctx.ellipse(dogX, dogY - dogScale * 0.05, this.radius * 0.03, this.radius * 0.02, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // --- 3. Cat (small, sitting in front/underneath) ---
+                const catWidth = this.radius * 0.2; 
+                const catHeight = this.radius * 0.1; 
+                const catX = domeCenterX - this.radius * 0.05;
+                
+                // Positioning adjusted to sit on the new platform
+                const catY = charactersBaseY + platformHeight / 2 - catHeight; 
+
+                // Cat Body (Gray/Tabby)
+                ctx.fillStyle = '#708090'; // Slate Gray
+                ctx.beginPath();
+                ctx.ellipse(catX, catY, catWidth / 2, catHeight / 2, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Cat Head
+                ctx.beginPath();
+                ctx.arc(catX - catWidth * 0.3, catY - catHeight * 0.5, catHeight, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Cat Ears (triangles)
+                ctx.beginPath();
+                ctx.moveTo(catX - catWidth * 0.4, catY - catHeight * 1.4);
+                ctx.lineTo(catX - catWidth * 0.2, catY - catHeight * 0.7);
+                ctx.lineTo(catX - catWidth * 0.6, catY - catHeight * 0.7);
+                ctx.closePath();
+                ctx.fill();
+
+                // Cat Eye
+                ctx.fillStyle = '#000000';
+                ctx.beginPath();
+                ctx.arc(catX - catWidth * 0.3, catY - catHeight * 0.5, this.radius * 0.015, 0, Math.PI * 2);
+                ctx.fill();
+
+
+                // --- Flashing Lights (4 lights around the rim) ---
+                const currentLightColor = this.lightColors[this.lightColorIndex];
+                const lightRadius = this.radius * 0.1; 
+                const rimRadius = this.radius * 1.1;
+
+                for (let i = 0; i < 4; i++) {
+                    const angle = (Math.PI / 2) * i + (Date.now() / 1000 * 0.05) % (Math.PI * 2);
+                    const lx = this.x + rimRadius * Math.cos(angle);
+                    const ly = this.y + rimRadius * 0.2 * Math.sin(angle);
+                    
+                    ctx.beginPath();
+                    ctx.fillStyle = currentLightColor;
+                    ctx.shadowColor = currentLightColor;
+                    ctx.shadowBlur = 10;
+                    ctx.arc(lx, ly, lightRadius, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.shadowBlur = 0;
+
+                ctx.restore();
+            },
+            
+            moveNewPosition: function() {
+                 this.x = random(this.radius * 2, canvas.width - this.radius * 2);
+                 this.y = random(50 + this.radius, canvas.height * TARGET_AREA_HEIGHT - this.radius);
+                 
+                 const speedIncrease = 1 + SCORE / 15;
+                 this.vx = (Math.random() > 0.5 ? 1 : -1) * random(1 * speedIncrease, 2 * speedIncrease);
+                 this.vy = (Math.random() > 0.5 ? 1 : -1) * random(1 * speedIncrease, 2 * speedIncrease);
+                 
+                 playUfoMoveSound();
+            }
+        };
+
+        // --- Canvas and Game Management ---
+        function resizeCanvas() {
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            TARGET.init();
+        }
+
+        function updateUI() {
+            scoreDisplay.textContent = `Score: ${SCORE}`;
+            missesDisplay.textContent = `Misses: ${MISSES}`; 
+        }
+
+        function resetGame() {
+            SCORE = 0;
+            MISSES = 0;
+            GAME_STATE = 'running';
+            FIREWORKS.length = 0;
+            PARTICLES.length = 0;
+            TARGET.init();
+            gameMessage.classList.add('hidden');
+            instructions.textContent = 'Click or tap the UFO carrying the boy, dog, and cat to score points! (Watch out, it gets faster!)';
+            updateUI();
+        }
+        
+        function gameOver() { 
+            // Game Over logic (currently only triggered manually or if a win condition is added)
+            GAME_STATE = 'over';
+            gameMessage.classList.remove('hidden');
+            messageTitle.textContent = 'GAME OVER!';
+            messageTitle.classList.add('text-yellow-300');
+            finalScore.textContent = `Final Score: ${SCORE}.`;
+        }
+
+        resizeCanvas();
+        window.addEventListener('load', () => {
+            TARGET.init();
+            updateUI();
+            animate();
+        });
+        window.addEventListener('resize', resizeCanvas);
+        restartButton.addEventListener('click', resetGame);
+
+
+        // --- Particle Class (Spark) ---
+        class Particle {
+            constructor(x, y, color, velocity, isRocket = false) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.vx = velocity.x;
+                this.vy = velocity.y;
+                this.alpha = 1;
+                this.radius = isRocket ? 2 : random(1, 3);
+                this.isRocket = isRocket;
+                this.decay = random(0.01, 0.03);
+            }
+
+            update() {
+                if (!this.isRocket) {
+                    this.vx *= FRICTION;
+                    this.vy *= FRICTION;
+                    this.vy += GRAVITY;
+                }
+                this.x += this.vx;
+                this.y += this.vy;
+                this.alpha -= this.decay;
+                if (this.alpha < 0) this.alpha = 0;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = this.alpha;
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        // --- Firework Class (Rocket) ---
+        class Firework {
+            constructor(targetX, targetY) {
+                this.targetX = targetX;
+                this.targetY = targetY;
+                this.x = canvas.width / 2;
+                this.y = canvas.height;
+                this.exploded = false;
+                this.color = randomColor();
+                this.isHitAttempt = false;
+
+                const angle = Math.atan2(targetY - this.y, targetX - this.x);
+                const speed = random(10, 15);
+                this.rocket = new Particle(
+                    this.x,
+                    this.y,
+                    this.color,
+                    { x: Math.cos(angle) * speed, y: Math.sin(angle) * speed },
+                    true
+                );
+            }
+
+            update() {
+                if (this.exploded) return;
+                this.rocket.update();
+
+                const distToTarget = Math.hypot(this.targetX - this.rocket.x, this.targetY - this.rocket.y);
+                const distFromOrigin = Math.hypot(this.x - this.rocket.x, this.y - this.rocket.y);
+                const totalDist = Math.hypot(this.targetX - this.x, this.targetY - this.y);
+
+                if (distToTarget < 20 || this.rocket.vy > 0 && distFromOrigin > totalDist * 0.8) {
+                    this.explode();
+                    this.exploded = true;
+                }
+            }
+
+            draw() {
+                if (!this.exploded) {
+                    this.rocket.draw();
+                }
+            }
+
+            explode() {
+                const count = 100;
+                for (let i = 0; i < count; i++) {
+                    const angle = random(0, Math.PI * 2);
+                    const speed = random(0.5, 7);
+                    const velocity = {
+                        x: Math.cos(angle) * speed,
+                        y: Math.sin(angle) * speed
+                    };
+                    PARTICLES.push(new Particle(this.rocket.x, this.rocket.y, this.color, velocity));
+                }
+                
+                if (GAME_STATE === 'running' && this.isHitAttempt) {
+                    const explosionX = this.rocket.x;
+                    const explosionY = this.rocket.y;
+                    
+                    const distanceToTarget = dist(explosionX, explosionY, TARGET.x, TARGET.y);
+
+                    if (distanceToTarget < TARGET_HIT_RADIUS) {
+                        // HIT! Simple score and target move
+                        explosionSynth.triggerAttackRelease("4n");
+
+                        SCORE++;
+                        TARGET.moveNewPosition();
+                        instructions.textContent = `HIT! Score +1. Next Oliver is faster and makes an eerie noise!`; 
+                        updateUI();
+                    } else {
+                        MISSES++;
+                        instructions.textContent = `MISS! Miss count: ${MISSES}. Keep firing!`;
+                        updateUI();
+                    }
+                }
+            }
+        }
+
+        // --- Main Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            // Redraw background with slight transparency for trailing effect
+            ctx.fillStyle = 'rgba(11, 12, 16, 0.1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            if (GAME_STATE === 'running') {
+                TARGET.update();
+                TARGET.draw();
+            }
+
+            // Update and draw fireworks and particles
+            for (let i = FIREWORKS.length - 1; i >= 0; i--) {
+                const firework = FIREWORKS[i];
+                firework.update();
+                firework.draw();
+                if (firework.exploded) {
+                    FIREWORKS.splice(i, 1);
+                }
+            }
+
+            for (let i = PARTICLES.length - 1; i >= 0; i--) {
+                const particle = PARTICLES[i];
+                particle.update();
+                particle.draw();
+                if (particle.alpha <= 0) {
+                    PARTICLES.splice(i, 1);
+                }
+            }
+        }
+
+        // --- Event Handlers ---
+        function launchFirework(event) {
+            // Initialize audio context on first user interaction
+            if (!isAudioInitialized) {
+                Tone.start();
+                initAudio();
+            }
+
+            if (GAME_STATE !== 'running') return;
+
+            let x, y;
+            if (event.touches && event.touches.length > 0) {
+                const rect = canvas.getBoundingClientRect();
+                x = event.touches[0].clientX - rect.left;
+                y = event.touches[0].clientY - rect.top;
+            } else {
+                x = event.offsetX;
+                y = event.offsetY;
+            }
+
+            if (y < canvas.height * TARGET_AREA_HEIGHT) {
+                 // Play laser sound
+                 laserSynth.triggerAttackRelease("8n", Tone.now(), 0.5);
+
+                 const newFirework = new Firework(x, y);
+                 const distanceToTarget = dist(x, y, TARGET.x, TARGET.y);
+                 if (distanceToTarget < TARGET_HIT_RADIUS * 2) { 
+                    newFirework.isHitAttempt = true;
+                 }
+                 FIREWORKS.push(newFirework);
+            }
+        }
+
+        canvas.addEventListener('click', launchFirework);
+        canvas.addEventListener('touchstart', launchFirework, { passive: true });
+
+    </script>
+</body>
+</html>
