@@ -109,8 +109,8 @@
                 const panValue = (TARGET.x / canvas.width) * 2 - 1; // Maps 0 (-1) to width (1)
                 ufoPanner.pan.value = panValue * 0.5; // Dampen the effect slightly
                 
-                // Play a low, eerie note
-                ufoSynth.triggerAttackRelease("C3", "4n");
+                // Play a low, eerie note, scheduled slightly in the future to avoid conflicts
+                ufoSynth.triggerAttackRelease("C3", "4n", Tone.now() + 0.001);
             }
         }
         
@@ -530,7 +530,8 @@
 
                     if (distanceToTarget < TARGET_HIT_RADIUS) {
                         // HIT! Simple score and target move
-                        explosionSynth.triggerAttackRelease("4n");
+                        // Schedule sound slightly in the future to prevent scheduling conflicts
+                        explosionSynth.triggerAttackRelease("4n", Tone.now() + 0.001);
 
                         SCORE++;
                         TARGET.moveNewPosition();
@@ -598,8 +599,8 @@
             }
 
             if (y < canvas.height * TARGET_AREA_HEIGHT) {
-                 // Play laser sound
-                 laserSynth.triggerAttackRelease("8n", Tone.now(), 0.5);
+                 // Play laser sound, scheduled slightly in the future to prevent scheduling conflicts
+                 laserSynth.triggerAttackRelease("8n", Tone.now() + 0.001, 0.5);
 
                  const newFirework = new Firework(x, y);
                  const distanceToTarget = dist(x, y, TARGET.x, TARGET.y);
